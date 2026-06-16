@@ -1,0 +1,6 @@
+{
+  "name": "Postman API Client",
+  "description": "An incredibly detailed and pixel-perfect clone of the Postman desktop and web API client, featuring workspaces, collections hierarchy, request controls, header tabs, and a mock request sender engine.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
