@@ -6,6 +6,8 @@ export interface KeyValueParam {
   value: string;
   description: string;
   enabled: boolean;
+  fieldType?: 'text' | 'file'; // form-data field kind (Postman-style)
+  files?: File[]; // in-memory only for fieldType 'file' (supports multi-select) — never persisted/sent to our backend
 }
 
 export interface ApiResponse {
@@ -18,7 +20,7 @@ export interface ApiResponse {
   isError: boolean;
 }
 
-export type AuthType = 'inherit' | 'none' | 'bearer';
+export type AuthType = 'inherit' | 'none' | 'bearer' | 'basic';
 
 export interface ApiRequest {
   id: string;
@@ -34,6 +36,8 @@ export interface ApiRequest {
   formData?: KeyValueParam[];
   authType?: AuthType;
   authToken?: string;
+  authUsername?: string; // used when authType === 'basic' (encoded into authToken for persistence)
+  authPassword?: string; // used when authType === 'basic' (encoded into authToken for persistence)
   response?: ApiResponse | null;
   folderId?: number | null; // backend folder this request lives in (null = root level)
   isDirty?: boolean; // unsaved local edits not yet persisted to backend

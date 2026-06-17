@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Folder,
   ChevronDown,
@@ -24,6 +24,7 @@ interface SidebarProps {
   onAddRequest?: () => void;
   onAddRequestInFolder?: (folderId: string) => void;
   onAddFolder?: () => void;
+  onImportCollection?: (file: File) => void;
   onAddSubfolder?: (folderId: string) => void;
   onRenameFolder?: (folderId: string, name: string) => void;
   onDeleteFolder?: (folderId: string) => void;
@@ -50,6 +51,7 @@ export default function Sidebar({
   onAddRequest,
   onAddRequestInFolder,
   onAddFolder,
+  onImportCollection,
   onAddSubfolder,
   onRenameFolder,
   onDeleteFolder,
@@ -61,6 +63,14 @@ export default function Sidebar({
   onSetActiveEnvironment,
   onDeleteEnvironment
 }: SidebarProps) {
+  const importInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImportFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) onImportCollection?.(file);
+    e.target.value = '';
+  };
+
   const [activeUtil, setActiveUtil] = useState('collections');
   const [width, setWidth] = useState(320);
   const [isResizing, setIsResizing] = useState(false);
@@ -351,7 +361,7 @@ export default function Sidebar({
       </div>
 
       {/* 2. Secondary collapsible workspace side panel */}
-      <div className="flex-1 flex flex-col bg-[#1c1c1c]">
+      <div className="flex-1 min-w-0 flex flex-col bg-[#1c1c1c] overflow-hidden">
         {/* Workspace Identity and Header Action Pills */}
         <div className="p-3 pb-2 flex flex-col gap-2.5">
           <div className="flex items-center justify-between">
@@ -368,7 +378,18 @@ export default function Sidebar({
 
             {/* Header buttons */}
             <div className="flex items-center gap-1">
-              <button className="h-[22px] px-2 bg-[#2d2d2d] hover:bg-[#3d3d3d] text-white font-medium text-[11px] rounded transition-colors cursor-pointer">
+              <input
+                ref={importInputRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={handleImportFileChange}
+                className="hidden"
+              />
+              <button
+                onClick={() => importInputRef.current?.click()}
+                className="h-[22px] px-2 bg-[#2d2d2d] hover:bg-[#3d3d3d] text-white font-medium text-[11px] rounded transition-colors cursor-pointer"
+                title="Postman collection (.json) faylini import qilish"
+              >
                 Import
               </button>
             </div>

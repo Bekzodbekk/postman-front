@@ -37,6 +37,7 @@ import {
   EnvironmentVariable
 } from './types';
 import { defaultHeaders } from './data/mockCollections';
+import { parsePostmanCollection, convertPostmanRequest, isPostmanFolder, PostmanItem } from './lib/postmanImport';
 import {
   Plus,
   X,
@@ -64,7 +65,25 @@ function parseFormData(bodyType: string, bodyRaw: string): KeyValueParam[] {
   }
 }
 
+// Basic Auth has no dedicated backend columns, so its username/password are JSON-encoded
+// into the existing generic auth_token text column (only when auth_type is 'basic').
+function encodeBasicAuthToken(username: string, password: string): string {
+  return JSON.stringify({ username, password });
+}
+
+function decodeBasicAuthToken(token: string): { username: string; password: string } {
+  try {
+    const parsed = JSON.parse(token);
+    return { username: parsed.username || '', password: parsed.password || '' };
+  } catch {
+    return { username: '', password: '' };
+  }
+}
+
 function dtoToApiRequest(dto: RequestDTO): ApiRequest {
+  const isBasic = dto.auth_type === 'basic';
+  const basicAuth = isBasic ? decodeBasicAuthToken(dto.auth_token || '') : null;
+
   return {
     id: String(dto.id),
     name: dto.name,
@@ -77,7 +96,9 @@ function dtoToApiRequest(dto: RequestDTO): ApiRequest {
     bodyRaw: dto.body_type === 'form-data' ? '' : dto.body_raw,
     formData: parseFormData(dto.body_type, dto.body_raw),
     authType: dto.auth_type || 'inherit',
-    authToken: dto.auth_token || '',
+    authToken: isBasic ? '' : dto.auth_token || '',
+    authUsername: basicAuth?.username || '',
+    authPassword: basicAuth?.password || '',
     response: null,
     folderId: dto.folder_id,
     isDirty: false,
@@ -118,6 +139,30 @@ export default function App() {
 
   // Collaboration: "Invite" modal visibility
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
+
+  // Drag-to-resize the boundary between the request builder and the response viewport
+  const [requestPanelHeight, setRequestPanelHeight] = useState(420);
+  const [isVerticalResizing, setIsVerticalResizing] = useState(false);
+
+  const startVerticalResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = requestPanelHeight;
+    setIsVerticalResizing(true);
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const next = startHeight + (ev.clientY - startY);
+      setRequestPanelHeight(Math.min(window.innerHeight - 220, Math.max(160, next)));
+    };
+    const onMouseUp = () => {
+      setIsVerticalResizing(false);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
 
   const loadCollections = useCallback(async (authToken: string) => {
     const [folderList, requestList, environmentList] = await Promise.all([
@@ -415,6 +460,63 @@ export default function App() {
     }
   };
 
+  // Import a Postman collection (.json export) — recreates its folder/request tree
+  // on the backend under a new root folder named after the collection.
+  const handleImportCollection = async (file: File) => {
+    if (!token) return;
+
+    try {
+      const text = await file.text();
+      const collection = parsePostmanCollection(text);
+
+      const newFolders: FolderDTO[] = [];
+      const newRequests: RequestDTO[] = [];
+      const newOpenFolderIds: number[] = [];
+
+      const importItems = async (items: PostmanItem[], parentId: number | null) => {
+        for (const item of items) {
+          if (isPostmanFolder(item)) {
+            const folder = await createFolder(token, item.name || 'Imported folder', parentId);
+            newFolders.push(folder);
+            newOpenFolderIds.push(folder.id);
+            await importItems(item.item || [], folder.id);
+          } else if (item.request) {
+            const converted = convertPostmanRequest(item);
+            const dto = await createRequest(token, {
+              folder_id: parentId,
+              name: converted.name,
+              method: converted.method,
+              url: converted.url,
+              params: converted.params,
+              headers: converted.headers,
+              body_type: converted.bodyType,
+              body_raw: converted.bodyRaw,
+              auth_type: converted.authType,
+              auth_token: converted.authToken,
+            });
+            newRequests.push(dto);
+          }
+        }
+      };
+
+      const rootFolder = await createFolder(
+        token,
+        collection.info?.name || file.name.replace(/\.json$/i, ''),
+        null
+      );
+      newFolders.push(rootFolder);
+      newOpenFolderIds.push(rootFolder.id);
+      await importItems(collection.item || [], rootFolder.id);
+
+      setFolders((prev) => [...prev, ...newFolders]);
+      setRequests((prev) => [...prev, ...newRequests.map(dtoToApiRequest)]);
+      setOpenFolderIds((prev) => new Set([...prev, ...newOpenFolderIds]));
+      showToast(`Import qilindi: ${newRequests.length} so'rov, ${newFolders.length} papka.`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Import qilishda xatolik.');
+    }
+  };
+
   // Rename a folder in place
   const handleRenameFolder = async (folderId: number, newName: string) => {
     if (!token || !newName.trim()) return;
@@ -479,8 +581,10 @@ export default function App() {
   const persistRequest = useCallback(async (target: ApiRequest, nameOverride?: string) => {
     if (!token) return;
 
+    // Strip the in-memory File blob before persisting — only the field's metadata
+    // (key/filename/type) is saved; the actual file content never reaches our backend.
     const bodyRaw = target.bodyType === 'form-data'
-      ? JSON.stringify(target.formData || [])
+      ? JSON.stringify((target.formData || []).map(({ files, ...rest }) => rest))
       : target.bodyRaw || '';
 
     const dto = await updateRequest(token, Number(target.id), {
@@ -493,7 +597,9 @@ export default function App() {
       body_type: target.bodyType,
       body_raw: bodyRaw,
       auth_type: target.authType || 'inherit',
-      auth_token: target.authToken || ''
+      auth_token: target.authType === 'basic'
+        ? encodeBasicAuthToken(target.authUsername || '', target.authPassword || '')
+        : target.authToken || ''
     });
     const saved = dtoToApiRequest(dto);
     setRequests(prev => prev.map(r => r.id === saved.id ? saved : r));
@@ -598,6 +704,10 @@ export default function App() {
 
     if (req.authType === 'bearer' && req.authToken) {
       headers['Authorization'] = `Bearer ${resolveVariables(req.authToken, activeVariables)}`;
+    } else if (req.authType === 'basic' && (req.authUsername || req.authPassword)) {
+      const username = resolveVariables(req.authUsername || '', activeVariables);
+      const password = resolveVariables(req.authPassword || '', activeVariables);
+      headers['Authorization'] = `Basic ${btoa(`${username}:${password}`)}`;
     }
 
     let body: BodyInit | undefined;
@@ -610,7 +720,13 @@ export default function App() {
     } else if (canHaveBody && req.bodyType === 'form-data') {
       const formData = new FormData();
       (req.formData || []).filter(f => f.key && f.enabled).forEach(f => {
-        formData.append(resolveVariables(f.key, activeVariables), resolveVariables(f.value, activeVariables));
+        const key = resolveVariables(f.key, activeVariables);
+        if (f.fieldType === 'file' && f.files?.length) {
+          // Files go straight from the browser to the target API — they never touch our backend.
+          f.files.forEach((file) => formData.append(key, file, file.name));
+        } else {
+          formData.append(key, resolveVariables(f.value, activeVariables));
+        }
       });
       body = formData;
       // Let the browser set its own multipart Content-Type (with boundary)
@@ -716,8 +832,8 @@ export default function App() {
       <Header onLogout={handleLogout} onInviteClick={() => setInviteModalOpen(true)} />
 
       {/* Main Content Workspace Panel */}
-      <div className="flex-1 flex items-stretch min-h-0 relative">
-        
+      <div className="flex-1 flex items-stretch min-h-0 relative overflow-hidden">
+
         {/* 2. Double Sidebar Navigation */}
         <Sidebar
           sidebarTree={sidebarTree}
@@ -726,6 +842,7 @@ export default function App() {
           onToggleFolder={handleToggleFolder}
           onAddRequest={() => handleAddRequest(null)}
           onAddRequestInFolder={(folderId) => handleAddRequest(Number(folderId))}
+          onImportCollection={handleImportCollection}
           onAddFolder={() => handleAddFolder(null)}
           onAddSubfolder={(folderId) => handleAddFolder(Number(folderId))}
           onRenameFolder={(folderId, name) => handleRenameFolder(Number(folderId), name)}
@@ -740,11 +857,11 @@ export default function App() {
         />
 
         {/* 3. Central Request-Response playground */}
-        <div className="flex-1 flex flex-col min-h-0 bg-[#212121]">
+        <div className="flex-1 min-w-0 flex flex-col min-h-0 bg-[#212121]">
           
           {/* Scrollable top Tab Bar exactly like the screenshot */}
           <div className="h-[38px] bg-[#1c1c1c] border-b border-[#2b2b2b] flex items-center justify-between text-xs select-none shrink-0 pr-3">
-            <div className="flex items-center gap-1 overflow-x-auto custom-scrollbar flex-1 mr-4">
+            <div className="flex items-center gap-1 overflow-x-auto custom-scrollbar flex-1 min-w-0 mr-4">
               {/* Internal Prev / Next navigation arrow icons */}
               <div className="flex items-center gap-0.5 text-gray-500 px-2 shrink-0 border-r border-[#2b2b2b] mr-1">
                 <ChevronLeft size={14} className="hover:text-gray-300 cursor-pointer" />
@@ -809,23 +926,32 @@ export default function App() {
 
           {/* Render Active Request configuration inside panels */}
           {activeRequest ? (
-            <div className="flex-1 flex flex-col min-h-0">
-              
+            <div className="flex-1 min-w-0 flex flex-col min-h-0">
+
               {/* TOP: Request address & inputs Builder */}
-              <RequestPanel
-                activeRequest={{ ...activeRequest, path: buildFolderPath(activeRequest.folderId, foldersById) }}
-                onSend={handleSendRequest}
-                onUpdateRequest={handleUpdateRequest}
-                onSave={handleSaveActiveRequest}
-                onRename={(newName) => handleRenameRequest(activeRequest.id, newName)}
-                isSending={isSending}
-                activeVariables={activeVariables}
-                activeEnvironmentName={activeEnvironment?.name}
-                onUpdateVariable={handleUpdateVariable}
+              <div style={{ height: requestPanelHeight }} className="shrink-0 overflow-y-auto custom-scrollbar">
+                <RequestPanel
+                  activeRequest={{ ...activeRequest, path: buildFolderPath(activeRequest.folderId, foldersById) }}
+                  onSend={handleSendRequest}
+                  onUpdateRequest={handleUpdateRequest}
+                  onSave={handleSaveActiveRequest}
+                  onRename={(newName) => handleRenameRequest(activeRequest.id, newName)}
+                  isSending={isSending}
+                  activeVariables={activeVariables}
+                  activeEnvironmentName={activeEnvironment?.name}
+                  onUpdateVariable={handleUpdateVariable}
+                />
+              </div>
+
+              {/* Drag handle: resize the request builder vs. response viewport split */}
+              <div
+                onMouseDown={startVerticalResize}
+                className={`h-[5px] shrink-0 cursor-row-resize relative z-10 transition-colors ${isVerticalResizing ? 'bg-[#ef5b25]/60' : 'bg-[#1c1c1c] hover:bg-[#ef5b25]/60'}`}
+                title="Kengligini o'zgartirish"
               />
 
               {/* BOTTOM: Response rendering viewport */}
-              <ResponsePanel 
+              <ResponsePanel
                 response={activeRequest.response}
                 isSending={isSending}
               />

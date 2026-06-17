@@ -21,11 +21,39 @@ export default function ResponsePanel({ response, isSending }: ResponsePanelProp
   const [responseTab, setResponseTab] = useState<'pretty' | 'raw' | 'preview'>('pretty');
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = () => {
+  // navigator.clipboard.writeText needs a secure context (HTTPS or localhost) — on a
+  // plain HTTP origin (like an IP address) it's undefined, so fall back to the legacy
+  // execCommand('copy') trick via a hidden textarea.
+  const legacyCopy = (text: string) => {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      document.execCommand('copy');
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  };
+
+  const handleCopy = async () => {
     if (!response) return;
-    navigator.clipboard.writeText(response.body);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(response.body);
+      } else {
+        legacyCopy(response.body);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      legacyCopy(response.body);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   // Status code color helper

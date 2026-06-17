@@ -172,6 +172,35 @@ export default function RequestPanel({
     }
   };
 
+  // Switch a form-data row between plain text and a file attachment. The file blob is
+  // kept only in browser memory (never persisted to our backend or saved to disk there) —
+  // it's read straight off disk and streamed into the outgoing request when Send is clicked.
+  const setFormDataFieldType = (index: number, fieldType: 'text' | 'file') => {
+    const newList = [...(activeRequest.formData || [])];
+    newList[index] = {
+      ...newList[index],
+      fieldType,
+      value: fieldType === 'text' ? '' : newList[index].value,
+      files: fieldType === 'text' ? undefined : newList[index].files
+    };
+    onUpdateRequest({ ...activeRequest, formData: newList });
+  };
+
+  const setFormDataFiles = (index: number, fileList: FileList | null) => {
+    const files = fileList && fileList.length > 0 ? Array.from(fileList) : undefined;
+    const newList = [...(activeRequest.formData || [])];
+    newList[index] = {
+      ...newList[index],
+      files,
+      value: files ? files.map((f) => f.name).join(', ') : ''
+    };
+    const lastItem = newList[newList.length - 1];
+    if (lastItem && (lastItem.key || lastItem.value || lastItem.description)) {
+      newList.push(emptyRow());
+    }
+    onUpdateRequest({ ...activeRequest, formData: newList });
+  };
+
   const deleteGridItem = (type: 'params' | 'headers' | 'formData', index: number) => {
     const originalList = type === 'params' ? activeRequest.params : type === 'headers' ? activeRequest.headers : (activeRequest.formData || []);
     if (originalList.length <= 1) return; // Keep at least one blank
@@ -201,46 +230,54 @@ export default function RequestPanel({
     }
   }, [activeRequest.id]);
 
-  // Render the URL bar's text with {{variable}} placeholders colored blue (resolved)
-  // or red (missing from the active environment), with a hover tooltip.
-  const renderHighlightedUrl = () => {
-    const parts = urlDraft.split(/(\{\{[^}]+\}\})/g);
-    return (
-      <div className="absolute inset-0 pl-3.5 pr-10 flex items-center font-mono text-[13px] whitespace-pre overflow-hidden pointer-events-none">
-        {parts.map((part, index) => {
-          if (part.startsWith('{{') && part.endsWith('}}')) {
-            const key = part.slice(2, -2).trim();
-            const resolved = activeVariables?.get(key);
-            const isKnown = resolved !== undefined;
-            return (
-              <span
-                key={index}
-                onMouseEnter={(e) => {
-                  const rect = (e.target as HTMLElement).getBoundingClientRect();
-                  showVariableTooltip(key, rect.left, rect.bottom);
-                }}
-                onMouseLeave={scheduleHideTooltip}
-                className={`font-bold px-0.5 rounded pointer-events-auto cursor-help ${
-                  isKnown
-                    ? 'text-[#a6d1ff] bg-[#14325a]/40 border border-[#23589b]/40'
-                    : 'text-[#ff8a8a] bg-[#3a1414]/50 border border-[#7a2424]/50'
-                }`}
-              >
-                {part}
-              </span>
-            );
-          }
-          return <span key={index} className="text-gray-100">{part}</span>;
-        })}
-      </div>
-    );
+  // Split text on {{variable}} placeholders, coloring each blue (resolved) or red
+  // (missing from the active environment), with a hover tooltip — shared by the URL
+  // bar and any other input that should highlight Postman-style variables.
+  const renderVariableSpans = (text: string) => {
+    const parts = text.split(/(\{\{[^}]+\}\})/g);
+    return parts.map((part, index) => {
+      if (part.startsWith('{{') && part.endsWith('}}')) {
+        const key = part.slice(2, -2).trim();
+        const resolved = activeVariables?.get(key);
+        const isKnown = resolved !== undefined;
+        return (
+          <span
+            key={index}
+            onMouseEnter={(e) => {
+              const rect = (e.target as HTMLElement).getBoundingClientRect();
+              showVariableTooltip(key, rect.left, rect.bottom);
+            }}
+            onMouseLeave={scheduleHideTooltip}
+            className={`font-bold px-0.5 rounded pointer-events-auto cursor-help ${
+              isKnown
+                ? 'text-[#a6d1ff] bg-[#14325a]/40 border border-[#23589b]/40'
+                : 'text-[#ff8a8a] bg-[#3a1414]/50 border border-[#7a2424]/50'
+            }`}
+          >
+            {part}
+          </span>
+        );
+      }
+      return <span key={index} className="text-gray-100">{part}</span>;
+    });
   };
+
+  const renderHighlightedUrl = () => (
+    <div className="absolute inset-0 pl-3.5 pr-10 flex items-center font-mono text-[13px] whitespace-pre overflow-hidden pointer-events-none">
+      {renderVariableSpans(urlDraft)}
+    </div>
+  );
 
   const authTypeLabels: Record<AuthType, string> = {
     inherit: 'Inherit auth from parent',
     none: 'No Auth',
-    bearer: 'Bearer Token'
+    bearer: 'Bearer Token',
+    basic: 'Basic Auth'
   };
+
+  const [isTokenFocused, setIsTokenFocused] = useState(false);
+  const [isUsernameFocused, setIsUsernameFocused] = useState(false);
+  const [isPasswordFocused, setIsPasswordFocused] = useState(false);
 
   return (
     <div className="flex flex-col bg-[#212121] select-none font-sans border-b border-[#2b2b2b]">
@@ -343,30 +380,38 @@ export default function RequestPanel({
             <div
               onMouseEnter={cancelHideTooltip}
               onMouseLeave={scheduleHideTooltip}
-              className="fixed z-[200] bg-[#2d2d2d] border border-[#3e3e3e] rounded shadow-2xl text-[11px] py-2 px-3 w-60"
+              className="fixed z-[200] bg-[#2d2d2d] border border-[#3e3e3e] rounded-md shadow-2xl text-[11px] p-2 w-64"
               style={{ top: hoveredVar.y + 4, left: hoveredVar.x }}
             >
-              <div className="text-gray-500 font-semibold mb-1.5">
-                {activeEnvironmentName || 'Collection'}
+              <input
+                value={tooltipValueDraft}
+                onChange={(e) => setTooltipValueDraft(e.target.value)}
+                onBlur={() => onUpdateVariable?.(hoveredVar.key, tooltipValueDraft)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') onUpdateVariable?.(hoveredVar.key, tooltipValueDraft);
+                }}
+                placeholder="aniqlanmagan"
+                className={`w-full bg-[#1c1c1c] border rounded px-2 py-1.5 outline-none font-mono text-[12px] ${
+                  activeVariables?.has(hoveredVar.key)
+                    ? 'text-[#a6d1ff] border-[#3e3e3e] focus:border-[#097bed]/60'
+                    : 'text-[#ff8a8a] border-[#7a2424]/60 focus:border-[#ef5b25]/60'
+                }`}
+              />
+              <div className="flex items-center justify-between mt-2 px-0.5">
+                <div className="flex items-center gap-1.5 text-gray-400">
+                  <span
+                    className={`w-3.5 h-3.5 rounded-[3px] text-white text-[9px] font-bold flex items-center justify-center shrink-0 ${
+                      activeEnvironmentName ? 'bg-[#097bed]' : 'bg-[#ef5b25]'
+                    }`}
+                  >
+                    {activeEnvironmentName ? 'E' : 'C'}
+                  </span>
+                  <span className="text-[10px] truncate">{activeEnvironmentName || 'Collection'}</span>
+                </div>
+                <span className="text-[10px] text-gray-500 hover:text-gray-300 cursor-pointer shrink-0">
+                  Variables in request →
+                </span>
               </div>
-              <div className="flex items-center gap-2 text-gray-300">
-                <span className="font-mono shrink-0">{hoveredVar.key}</span>
-                <input
-                  value={tooltipValueDraft}
-                  onChange={(e) => setTooltipValueDraft(e.target.value)}
-                  onBlur={() => onUpdateVariable?.(hoveredVar.key, tooltipValueDraft)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') onUpdateVariable?.(hoveredVar.key, tooltipValueDraft);
-                  }}
-                  placeholder="aniqlanmagan"
-                  className={`flex-1 bg-[#1c1c1c] border rounded px-1.5 py-0.5 outline-none font-mono text-[11px] ${
-                    activeVariables?.has(hoveredVar.key)
-                      ? 'text-[#a6d1ff] border-[#3e3e3e] focus:border-[#097bed]/60'
-                      : 'text-[#ff8a8a] border-[#7a2424]/60 focus:border-[#ef5b25]/60'
-                  }`}
-                />
-              </div>
-              <div className="text-gray-600 mt-1.5 text-[10px]">Variables in request →</div>
             </div>
           )}
         </div>
@@ -587,13 +632,78 @@ export default function RequestPanel({
             {activeRequest.authType === 'bearer' && (
               <div className="flex items-center gap-3 max-w-lg">
                 <span className="font-semibold text-gray-400 shrink-0 w-12">Token</span>
-                <input
-                  type="text"
-                  value={activeRequest.authToken || ''}
-                  onChange={(e) => onUpdateRequest({ ...activeRequest, authToken: e.target.value })}
-                  placeholder="{{token}}"
-                  className="flex-1 bg-[#2d2d2d] border border-[#3e3e3e] rounded px-2.5 py-1.5 outline-none text-gray-200 font-mono text-xs focus:border-[#ef5b25]/60"
-                />
+                <div className="relative flex-1">
+                  <input
+                    type="text"
+                    value={activeRequest.authToken || ''}
+                    onChange={(e) => onUpdateRequest({ ...activeRequest, authToken: e.target.value })}
+                    onFocus={() => setIsTokenFocused(true)}
+                    onBlur={() => setIsTokenFocused(false)}
+                    placeholder="{{token}}"
+                    className={`w-full bg-[#2d2d2d] border border-[#3e3e3e] rounded px-2.5 py-1.5 outline-none font-mono text-xs focus:border-[#ef5b25]/60 ${
+                      isTokenFocused ? 'text-gray-200' : 'text-transparent caret-gray-200'
+                    }`}
+                  />
+                  {!isTokenFocused && (
+                    <div className="absolute inset-0 pl-2.5 pr-2.5 flex items-center font-mono text-xs whitespace-pre overflow-hidden pointer-events-none">
+                      {renderVariableSpans(activeRequest.authToken || '')}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {activeRequest.authType === 'basic' && (
+              <div className="flex flex-col gap-3 max-w-lg">
+                <div className="flex items-center gap-3">
+                  <span className="font-semibold text-gray-400 shrink-0 w-16">Username</span>
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      value={activeRequest.authUsername || ''}
+                      onChange={(e) => onUpdateRequest({ ...activeRequest, authUsername: e.target.value })}
+                      onFocus={() => setIsUsernameFocused(true)}
+                      onBlur={() => setIsUsernameFocused(false)}
+                      placeholder="Username"
+                      className={`w-full bg-[#2d2d2d] border border-[#3e3e3e] rounded px-2.5 py-1.5 outline-none font-mono text-xs focus:border-[#ef5b25]/60 ${
+                        isUsernameFocused ? 'text-gray-200' : 'text-transparent caret-gray-200'
+                      }`}
+                    />
+                    {!isUsernameFocused && (
+                      <div className="absolute inset-0 pl-2.5 pr-2.5 flex items-center font-mono text-xs whitespace-pre overflow-hidden pointer-events-none">
+                        {activeRequest.authUsername
+                          ? renderVariableSpans(activeRequest.authUsername)
+                          : <span className="text-gray-500">Username</span>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="font-semibold text-gray-400 shrink-0 w-16">Password</span>
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      value={activeRequest.authPassword || ''}
+                      onChange={(e) => onUpdateRequest({ ...activeRequest, authPassword: e.target.value })}
+                      onFocus={() => setIsPasswordFocused(true)}
+                      onBlur={() => setIsPasswordFocused(false)}
+                      placeholder="Password"
+                      className={`w-full bg-[#2d2d2d] border border-[#3e3e3e] rounded px-2.5 py-1.5 outline-none font-mono text-xs focus:border-[#ef5b25]/60 ${
+                        isPasswordFocused ? 'text-gray-200' : 'text-transparent caret-gray-200'
+                      }`}
+                    />
+                    {!isPasswordFocused && (
+                      <div className="absolute inset-0 pl-2.5 pr-2.5 flex items-center font-mono text-xs whitespace-pre overflow-hidden pointer-events-none">
+                        {activeRequest.authPassword
+                          ? renderVariableSpans(activeRequest.authPassword)
+                          : <span className="text-gray-500">Password</span>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <p className="text-gray-500 leading-relaxed text-[11px]">
+                  The authorization header will be automatically generated when you send the request.
+                </p>
               </div>
             )}
 
@@ -666,7 +776,8 @@ export default function RequestPanel({
                   <thead>
                     <tr className="border-b border-[#2b2b2b] text-[11px] text-gray-400 uppercase select-none tracking-wider bg-[#1f1f1f]/30">
                       <th className="w-10 px-3 py-2 text-center text-gray-500">Enable</th>
-                      <th className="w-1/3 border-r border-[#2b2b2b]/60 px-3 py-2">Key</th>
+                      <th className="w-1/4 border-r border-[#2b2b2b]/60 px-3 py-2">Key</th>
+                      <th className="w-16 border-r border-[#2b2b2b]/60 px-3 py-2">Type</th>
                       <th className="w-1/3 border-r border-[#2b2b2b]/60 px-3 py-2">Value</th>
                       <th className="border-r border-[#2b2b2b]/60 px-3 py-2">Description</th>
                       <th className="w-10 px-2 py-2 text-center"></th>
@@ -693,13 +804,44 @@ export default function RequestPanel({
                           />
                         </td>
                         <td className="border-r border-[#2b2b2b]/60 px-1 py-1">
-                          <input
-                            type="text"
-                            value={item.value}
-                            onChange={(e) => updateGridItem('formData', index, 'value', e.target.value)}
-                            placeholder="Value"
-                            className="w-full bg-transparent px-2 py-0.5 outline-none text-gray-200 placeholder-gray-600 font-mono text-[11.5px]"
-                          />
+                          <select
+                            value={item.fieldType || 'text'}
+                            onChange={(e) => setFormDataFieldType(index, e.target.value as 'text' | 'file')}
+                            className="w-full bg-transparent px-1 py-0.5 outline-none text-gray-300 font-mono text-[11px] cursor-pointer"
+                          >
+                            <option value="text">Text</option>
+                            <option value="file">File</option>
+                          </select>
+                        </td>
+                        <td className="border-r border-[#2b2b2b]/60 px-1 py-1">
+                          {item.fieldType === 'file' ? (
+                            <label className="flex items-center gap-2 px-2 py-0.5 cursor-pointer">
+                              <span className="text-[10px] px-1.5 py-0.5 bg-[#2d2d2d] hover:bg-[#3a3a3a] rounded text-gray-300 shrink-0">
+                                Choose File
+                              </span>
+                              <span className="truncate text-gray-400 text-[11px]">
+                                {item.files?.length
+                                  ? item.files.length === 1
+                                    ? item.files[0].name
+                                    : `${item.files.length} files selected`
+                                  : 'No file selected'}
+                              </span>
+                              <input
+                                type="file"
+                                multiple
+                                className="hidden"
+                                onChange={(e) => setFormDataFiles(index, e.target.files)}
+                              />
+                            </label>
+                          ) : (
+                            <input
+                              type="text"
+                              value={item.value}
+                              onChange={(e) => updateGridItem('formData', index, 'value', e.target.value)}
+                              placeholder="Value"
+                              className="w-full bg-transparent px-2 py-0.5 outline-none text-gray-200 placeholder-gray-600 font-mono text-[11.5px]"
+                            />
+                          )}
                         </td>
                         <td className="border-r border-[#2b2b2b]/60 px-1 py-1">
                           <input
